@@ -21,7 +21,7 @@ def test_readyz_without_database_is_ready() -> None:
 
 
 def test_ping() -> None:
-    response = TestClient(app).get("/api/v1/ping")
+    response = TestClient(app).get("/api/v1/work/ping")
     assert response.status_code == 200
     assert response.json() == {"ping": "pong", "service": "worklog"}
 

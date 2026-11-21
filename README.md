@@ -7,7 +7,7 @@ NeatSprint **Worklog Service**.
 | Service name | `worklog` |
 | Container port | `8000` |
 | Host port (dev) | `8005` |
-| Gateway prefix | `/api/v1/worklog` |
+| Gateway prefix | `/api/v1/work` |
 | Database | `db_worklog` |
 | Owner | OpenCade (AI) / Laksiri (approval) |
 
@@ -24,7 +24,7 @@ cp .env.example .env
 uv run uvicorn neatsprint_worklog.main:app --reload --port 8000
 ```
 
-Or from the orchestrator: `docker compose up -d worklog`.
+Or from the orchestrator: `docker compose up -d neatsprint-worklog`.
 
 ## Endpoints
 
