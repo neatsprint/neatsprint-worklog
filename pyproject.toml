@@ -8,7 +8,10 @@ license = { text = "AGPL-3.0-or-later" }
 dependencies = [
     "fastapi>=0.115.0,<1.0",
     "uvicorn[standard]>=0.32.0,<1.0",
-    "neatsprint-lib @ git+https://github.com/neatsprint/neatsprint-lib@v0.3.0",
+    "neatsprint-lib @ git+https://github.com/neatsprint/neatsprint-lib@v0.4.0",
+    "alembic>=1.14.0,<2.0",
+    "httpx>=0.27.0,<1.0",
+    "boto3>=1.35.0,<2.0",
 ]
 
 [dependency-groups]
@@ -46,6 +49,7 @@ ignore = ["S101", "B008"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106"]
+"migrations/*" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

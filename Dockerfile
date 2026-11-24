@@ -18,7 +18,11 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
-RUN uv sync --frozen --no-dev
+COPY migrations ./migrations
+COPY alembic.ini ./
+COPY docker ./docker
+RUN uv sync --frozen --no-dev \
+    && chmod +x /app/docker/entrypoint.sh
 
 RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
@@ -29,4 +33,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" || exit 1
 
-CMD ["uvicorn", "neatsprint_worklog.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+CMD ["/app/docker/entrypoint.sh"]
