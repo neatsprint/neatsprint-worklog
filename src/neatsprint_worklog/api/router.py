@@ -247,6 +247,8 @@ def _add_entry(
             "project_id": str(project_id) if project_id else None,
             "duration_seconds": duration_seconds,
             "source": source,
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
         },
     )
     return entry
@@ -579,6 +581,21 @@ async def update_entry(
         before=before,
         after=entry_payload(entry),
     )
+    enqueue(
+        session,
+        event_type="time_entry.updated",
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        payload={
+            "entry_id": str(entry.id),
+            "user_id": str(entry.user_id),
+            "project_id": str(entry.project_id) if entry.project_id else None,
+            "item_id": str(entry.item_id) if entry.item_id else None,
+            "started_at": entry.started_at.isoformat(),
+            "duration_seconds": entry.duration_seconds,
+            "source": entry.source,
+        },
+    )
     await session.commit()
     return JSONResponse(envelope(request, entry_payload(entry)))
 
@@ -603,6 +620,13 @@ async def delete_entry(
         action="DELETE",
         before=entry_payload(entry),
         after=None,
+    )
+    enqueue(
+        session,
+        event_type="time_entry.deleted",
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        payload={"entry_id": str(entry.id), "user_id": str(entry.user_id)},
     )
     await session.commit()
     return Response(status_code=204)
