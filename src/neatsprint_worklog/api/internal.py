@@ -6,13 +6,14 @@ import secrets
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from neatsprint_lib.db import bind_tenant, get_session
 from neatsprint_lib.errors import ApiError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from neatsprint_worklog.db.models import WorkSession
+from neatsprint_worklog.db.models import TimeEntry, WorkSession
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 AdminSession = Annotated[AsyncSession, Depends(get_session)]
@@ -66,5 +67,46 @@ async def internal_session(
                     work_session.ended_at.isoformat() if work_session.ended_at else None
                 ),
             },
+        )
+    )
+
+
+@router.get("/entries", summary="Internal paginated time entries")
+async def internal_entries(
+    tenant_id: UUID,
+    _: ServiceDep,
+    request: Request,
+    session: AdminSession,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> JSONResponse:
+    bind_tenant(session, tenant_id)
+    rows = (
+        await session.execute(
+            select(TimeEntry)
+            .where(
+                TimeEntry.tenant_id == tenant_id,
+                TimeEntry.deleted_at.is_(None),
+            )
+            .order_by(TimeEntry.started_at, TimeEntry.id)
+            .offset(offset)
+            .limit(limit)
+        )
+    ).scalars()
+    return JSONResponse(
+        envelope(
+            request,
+            [
+                {
+                    "entry_id": str(row.id),
+                    "user_id": str(row.user_id),
+                    "project_id": str(row.project_id) if row.project_id else None,
+                    "item_id": str(row.item_id) if row.item_id else None,
+                    "started_at": row.started_at.isoformat(),
+                    "duration_seconds": row.duration_seconds,
+                    "source": row.source,
+                }
+                for row in rows
+            ],
         )
     )
