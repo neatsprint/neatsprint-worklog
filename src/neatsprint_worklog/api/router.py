@@ -38,6 +38,7 @@ router = APIRouter(tags=["work"])
 async def ping() -> dict[str, str]:
     return {"ping": "pong", "service": "worklog"}
 
+
 SessionDep = Annotated[AsyncSession, Depends(get_tenant_session)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
 TimerPerm = Annotated[Principal, Depends(require_permission("work:timer:start"))]
@@ -76,6 +77,7 @@ def session_payload(session: WorkSession, now: datetime | None = None) -> dict[s
         "user_id": str(session.user_id),
         "item_id": str(session.item_id) if session.item_id else None,
         "project_id": str(session.project_id) if session.project_id else None,
+        "sprint_id": str(session.sprint_id) if session.sprint_id else None,
         "device_id": session.device_id,
         "state": session.state,
         "started_at": session.started_at.isoformat(),
@@ -92,6 +94,7 @@ def entry_payload(entry: TimeEntry) -> dict[str, object]:
         "user_id": str(entry.user_id),
         "item_id": str(entry.item_id) if entry.item_id else None,
         "project_id": str(entry.project_id) if entry.project_id else None,
+        "sprint_id": str(entry.sprint_id) if entry.sprint_id else None,
         "started_at": entry.started_at.isoformat(),
         "ended_at": entry.ended_at.isoformat(),
         "duration_seconds": entry.duration_seconds,
@@ -115,7 +118,14 @@ async def _open_session(
     ).scalar_one_or_none()
 
 
-async def _task_item(request: Request, tenant_id: UUID, item_id: UUID) -> dict[str, Any]:
+async def _task_lookup(
+    request: Request,
+    tenant_id: UUID,
+    path: str,
+    *,
+    not_found_code: str,
+    not_found_message: str,
+) -> dict[str, Any]:
     settings = request.app.state.settings
     token = settings.service_token or settings.bootstrap_token
     if not token:
@@ -123,7 +133,7 @@ async def _task_item(request: Request, tenant_id: UUID, item_id: UUID) -> dict[s
     try:
         async with httpx.AsyncClient(timeout=3) as client:
             response = await client.get(
-                f"{settings.task_internal_url}/internal/items/{item_id}",
+                f"{settings.task_internal_url}{path}",
                 params={"tenant_id": str(tenant_id)},
                 headers={"X-Service-Token": token},
             )
@@ -132,30 +142,84 @@ async def _task_item(request: Request, tenant_id: UUID, item_id: UUID) -> dict[s
             503, "dependency_unavailable", "Could not validate the task right now."
         ) from exc
     if response.status_code == 404:
-        raise ApiError(422, "invalid_item", "That task does not exist in this workspace.")
+        raise ApiError(422, not_found_code, not_found_message)
     if response.status_code != 200:
-        raise ApiError(
-            503, "dependency_unavailable", "Could not validate the task right now."
-        )
+        raise ApiError(503, "dependency_unavailable", "Could not validate the task right now.")
     payload = response.json().get("data")
     if not isinstance(payload, dict):
         raise ApiError(503, "dependency_unavailable", "Could not validate the task right now.")
     return payload
 
 
-async def _resolve_scope(
+async def _task_item(request: Request, tenant_id: UUID, item_id: UUID) -> dict[str, Any]:
+    return await _task_lookup(
+        request,
+        tenant_id,
+        f"/internal/items/{item_id}",
+        not_found_code="invalid_item",
+        not_found_message="That task does not exist in this workspace.",
+    )
+
+
+async def _task_sprint(request: Request, tenant_id: UUID, sprint_id: UUID) -> dict[str, Any]:
+    return await _task_lookup(
+        request,
+        tenant_id,
+        f"/internal/sprints/{sprint_id}",
+        not_found_code="invalid_sprint",
+        not_found_message="That sprint does not exist in this workspace.",
+    )
+
+
+async def _time_policy(request: Request, tenant_id: UUID) -> bool:
+    settings = request.app.state.settings
+    token = settings.bootstrap_token
+    if not token:
+        raise ApiError(503, "dependency_unavailable", "Time policy is not configured.")
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            response = await client.get(
+                f"{settings.core_internal_url}/internal/tenants/{tenant_id}/time-policy",
+                headers={"X-Bootstrap-Token": token},
+            )
+    except httpx.HTTPError as exc:
+        raise ApiError(
+            503, "dependency_unavailable", "Could not check the time policy right now."
+        ) from exc
+    if response.status_code != 200:
+        raise ApiError(503, "dependency_unavailable", "Could not check the time policy right now.")
+    data = response.json().get("data") or {}
+    return bool(data.get("allow_time_without_sprint"))
+
+
+async def _resolve_assignment(
     request: Request,
     tenant_id: UUID,
     item_id: UUID | None,
     project_id: UUID | None,
-) -> UUID | None:
-    if item_id is None:
-        return project_id
-    item = await _task_item(request, tenant_id, item_id)
-    resolved = UUID(str(item["project_id"]))
-    if project_id is not None and resolved != project_id:
-        raise ApiError(422, "invalid_item", "The task does not belong to that project.")
-    return resolved
+    sprint_id: UUID | None,
+) -> tuple[UUID | None, UUID | None]:
+    resolved_project = project_id
+    resolved_sprint = sprint_id
+    if item_id is not None:
+        item = await _task_item(request, tenant_id, item_id)
+        item_project = UUID(str(item["project_id"]))
+        item_sprint = UUID(str(item["sprint_id"])) if item.get("sprint_id") else None
+        if project_id is not None and item_project != project_id:
+            raise ApiError(422, "invalid_item", "The task does not belong to that project.")
+        if sprint_id is not None and item_sprint != sprint_id:
+            raise ApiError(422, "invalid_item", "That task is not in the selected sprint.")
+        resolved_project = item_project
+        resolved_sprint = item_sprint
+    if resolved_sprint is not None:
+        sprint = await _task_sprint(request, tenant_id, resolved_sprint)
+        sprint_project = UUID(str(sprint["project_id"]))
+        if resolved_project is not None and sprint_project != resolved_project:
+            raise ApiError(422, "invalid_sprint", "The sprint does not belong to that project.")
+        resolved_project = sprint_project
+    if resolved_sprint is None and not await _time_policy(request, tenant_id):
+        raise ApiError(422, "sprint_required", "Choose a sprint to log time.")
+    return resolved_project, resolved_sprint
 
 
 def _audit(
@@ -192,9 +256,7 @@ def _assert_edit_window(principal: Principal, entry: TimeEntry) -> None:
         )
 
 
-def _entry_duration(
-    started_at: datetime, ended_at: datetime, requested: int | None
-) -> int:
+def _entry_duration(started_at: datetime, ended_at: datetime, requested: int | None) -> int:
     span = int((ended_at - started_at).total_seconds())
     if span <= 0:
         raise ApiError(422, "validation_failed", "The end time must follow the start time.")
@@ -211,6 +273,7 @@ def _add_entry(
     user_id: UUID,
     item_id: UUID | None,
     project_id: UUID | None,
+    sprint_id: UUID | None = None,
     started_at: datetime,
     ended_at: datetime,
     duration_seconds: int,
@@ -226,6 +289,7 @@ def _add_entry(
         user_id=user_id,
         item_id=item_id,
         project_id=project_id,
+        sprint_id=sprint_id,
         started_at=started_at,
         ended_at=ended_at,
         duration_seconds=duration_seconds,
@@ -279,8 +343,8 @@ async def start_session(
             "session_exists",
             "A work session is already running. Stop it before starting another.",
         )
-    project_id = await _resolve_scope(
-        request, principal.tenant_id, payload.item_id, payload.project_id
+    project_id, sprint_id = await _resolve_assignment(
+        request, principal.tenant_id, payload.item_id, payload.project_id, payload.sprint_id
     )
     started = _now()
     work_session = WorkSession(
@@ -289,6 +353,7 @@ async def start_session(
         user_id=principal.user_id,
         item_id=payload.item_id,
         project_id=project_id,
+        sprint_id=sprint_id,
         device_id=payload.device_id,
         state="RUNNING",
         started_at=started,
@@ -308,9 +373,7 @@ async def start_session(
         },
     )
     await session.commit()
-    return JSONResponse(
-        envelope(request, session_payload(work_session, started)), status_code=201
-    )
+    return JSONResponse(envelope(request, session_payload(work_session, started)), status_code=201)
 
 
 @router.post("/stop", summary="Stop the current work session")
@@ -340,6 +403,7 @@ async def stop_session(
             user_id=principal.user_id,
             item_id=work_session.item_id,
             project_id=work_session.project_id,
+            sprint_id=work_session.sprint_id,
             started_at=work_session.started_at,
             ended_at=now,
             duration_seconds=duration,
@@ -407,9 +471,7 @@ async def current_session(
     principal: CurrentPrincipal, request: Request, session: SessionDep
 ) -> JSONResponse:
     work_session = await _open_session(session, principal.tenant_id, principal.user_id)
-    return JSONResponse(
-        envelope(request, session_payload(work_session) if work_session else None)
-    )
+    return JSONResponse(envelope(request, session_payload(work_session) if work_session else None))
 
 
 @router.post("/idle", summary="Record an idle segment")
@@ -446,16 +508,17 @@ async def sync_entries(
 ) -> JSONResponse:
     created: list[str] = []
     skipped: list[str] = []
-    scopes: dict[UUID | None, UUID | None] = {}
+    scopes: dict[tuple[UUID | None, UUID | None, UUID | None], tuple[UUID | None, UUID | None]] = {}
     for item in payload.entries:
         if await _existing_entry(session, principal.tenant_id, item.client_id) is not None:
             skipped.append(str(item.client_id))
             continue
-        if item.item_id not in scopes:
-            scopes[item.item_id] = await _resolve_scope(
-                request, principal.tenant_id, item.item_id, item.project_id
+        scope_key = (item.item_id, item.project_id, item.sprint_id)
+        if scope_key not in scopes:
+            scopes[scope_key] = await _resolve_assignment(
+                request, principal.tenant_id, item.item_id, item.project_id, item.sprint_id
             )
-        project_id = scopes[item.item_id]
+        project_id, sprint_id = scopes[scope_key]
         duration = _entry_duration(item.started_at, item.ended_at, item.duration_seconds)
         entry = _add_entry(
             session,
@@ -463,6 +526,7 @@ async def sync_entries(
             user_id=principal.user_id,
             item_id=item.item_id,
             project_id=project_id,
+            sprint_id=sprint_id,
             started_at=item.started_at,
             ended_at=item.ended_at,
             duration_seconds=duration,
@@ -481,18 +545,17 @@ async def sync_entries(
 async def create_entry(
     payload: ManualEntry, principal: WritePerm, request: Request, session: SessionDep
 ) -> JSONResponse:
-    project_id = await _resolve_scope(
-        request, principal.tenant_id, payload.item_id, payload.project_id
+    project_id, sprint_id = await _resolve_assignment(
+        request, principal.tenant_id, payload.item_id, payload.project_id, payload.sprint_id
     )
-    duration = _entry_duration(
-        payload.started_at, payload.ended_at, payload.duration_seconds
-    )
+    duration = _entry_duration(payload.started_at, payload.ended_at, payload.duration_seconds)
     entry = _add_entry(
         session,
         tenant_id=principal.tenant_id,
         user_id=principal.user_id,
         item_id=payload.item_id,
         project_id=project_id,
+        sprint_id=sprint_id,
         started_at=payload.started_at,
         ended_at=payload.ended_at,
         duration_seconds=duration,
@@ -548,22 +611,24 @@ async def update_entry(
     session: SessionDep,
 ) -> JSONResponse:
     entry = await session.get(TimeEntry, entry_id)
-    if (
-        entry is None
-        or entry.tenant_id != principal.tenant_id
-        or entry.deleted_at is not None
-    ):
+    if entry is None or entry.tenant_id != principal.tenant_id or entry.deleted_at is not None:
         raise ApiError(404, "not_found", "Time entry not found.")
     _assert_edit_window(principal, entry)
     before = entry_payload(entry)
     data = payload.model_dump(exclude_unset=True)
-    if "item_id" in data:
-        entry.item_id = data["item_id"]
-        entry.project_id = await _resolve_scope(
-            request, principal.tenant_id, data["item_id"], data.get("project_id")
+    if {"item_id", "project_id", "sprint_id"} & data.keys():
+        if "item_id" in data:
+            item_id = data["item_id"]
+            project_id = data.get("project_id")
+            sprint_id = data.get("sprint_id")
+        else:
+            item_id = entry.item_id
+            project_id = data.get("project_id", entry.project_id)
+            sprint_id = data.get("sprint_id", entry.sprint_id)
+        entry.item_id = item_id
+        entry.project_id, entry.sprint_id = await _resolve_assignment(
+            request, principal.tenant_id, item_id, project_id, sprint_id
         )
-    elif "project_id" in data:
-        entry.project_id = data["project_id"]
     if "started_at" in data:
         entry.started_at = data["started_at"]
     if "ended_at" in data:
@@ -601,15 +666,9 @@ async def update_entry(
 
 
 @router.delete("/entries/{entry_id}", status_code=204, summary="Delete a time entry")
-async def delete_entry(
-    entry_id: UUID, principal: WritePerm, session: SessionDep
-) -> Response:
+async def delete_entry(entry_id: UUID, principal: WritePerm, session: SessionDep) -> Response:
     entry = await session.get(TimeEntry, entry_id)
-    if (
-        entry is None
-        or entry.tenant_id != principal.tenant_id
-        or entry.deleted_at is not None
-    ):
+    if entry is None or entry.tenant_id != principal.tenant_id or entry.deleted_at is not None:
         raise ApiError(404, "not_found", "Time entry not found.")
     _assert_edit_window(principal, entry)
     entry.deleted_at = _now()
@@ -630,6 +689,12 @@ async def delete_entry(
     )
     await session.commit()
     return Response(status_code=204)
+
+
+@router.get("/policy", summary="Time logging policy for my tenant")
+async def time_policy(principal: ViewPerm, request: Request) -> JSONResponse:
+    allow = await _time_policy(request, principal.tenant_id)
+    return JSONResponse(envelope(request, {"allow_time_without_sprint": allow}))
 
 
 @router.get("/timesheet", summary="Weekly timesheet")
@@ -676,8 +741,7 @@ async def timesheet(
                 "user_id": str(target_user),
                 "total_seconds": sum(by_day.values()),
                 "days": [
-                    {"date": day, "seconds": seconds}
-                    for day, seconds in sorted(by_day.items())
+                    {"date": day, "seconds": seconds} for day, seconds in sorted(by_day.items())
                 ],
                 "projects": [
                     {"project_id": project, "seconds": seconds}

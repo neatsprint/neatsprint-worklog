@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 class SessionStart(BaseModel):
     item_id: UUID | None = None
     project_id: UUID | None = None
+    sprint_id: UUID | None = None
     device_id: str | None = Field(default=None, max_length=128)
     comment: str | None = Field(default=None, max_length=2000)
 
@@ -35,6 +36,7 @@ class IdleReport(BaseModel):
 class ManualEntry(BaseModel):
     item_id: UUID | None = None
     project_id: UUID | None = None
+    sprint_id: UUID | None = None
     started_at: datetime
     ended_at: datetime
     duration_seconds: int | None = Field(default=None, ge=1)
@@ -51,6 +53,7 @@ class ManualEntry(BaseModel):
 class EntryUpdate(BaseModel):
     item_id: UUID | None = None
     project_id: UUID | None = None
+    sprint_id: UUID | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     duration_seconds: int | None = Field(default=None, ge=1)
@@ -61,6 +64,7 @@ class SyncEntry(BaseModel):
     client_id: UUID
     item_id: UUID | None = None
     project_id: UUID | None = None
+    sprint_id: UUID | None = None
     started_at: datetime
     ended_at: datetime
     duration_seconds: int = Field(ge=1)

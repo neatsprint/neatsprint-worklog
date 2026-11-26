@@ -7,7 +7,14 @@ import pytest
 from neatsprint_lib.auth import Principal
 from neatsprint_lib.errors import ApiError
 
-from neatsprint_worklog.api.router import _entry_duration, _live_seconds, _range, _target_user
+from neatsprint_worklog.api import router as worklog_router
+from neatsprint_worklog.api.router import (
+    _entry_duration,
+    _live_seconds,
+    _range,
+    _resolve_assignment,
+    _target_user,
+)
 from neatsprint_worklog.db.models import WorkSession
 
 
@@ -70,6 +77,99 @@ def test_entry_duration_rejects_clock_gaming() -> None:
 def test_range_defaults_to_seven_days() -> None:
     start, end = _range(None, None)
     assert (end - start) == timedelta(days=7)
+
+
+def _stub_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    items: dict[object, dict[str, object]],
+    sprints: dict[object, dict[str, object]],
+    allow_without_sprint: bool,
+) -> None:
+    async def task_item(request: object, tenant_id: object, item_id: object) -> dict[str, object]:
+        if item_id not in items:
+            raise ApiError(422, "invalid_item", "missing")
+        return items[item_id]
+
+    async def task_sprint(
+        request: object, tenant_id: object, sprint_id: object
+    ) -> dict[str, object]:
+        if sprint_id not in sprints:
+            raise ApiError(422, "invalid_sprint", "missing")
+        return sprints[sprint_id]
+
+    async def time_policy(request: object, tenant_id: object) -> bool:
+        return allow_without_sprint
+
+    monkeypatch.setattr(worklog_router, "_task_item", task_item)
+    monkeypatch.setattr(worklog_router, "_task_sprint", task_sprint)
+    monkeypatch.setattr(worklog_router, "_time_policy", time_policy)
+
+
+async def test_item_in_sprint_inherits_sprint_when_none_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, sprint, item = uuid4(), uuid4(), uuid4()
+    _stub_assignment(
+        monkeypatch,
+        items={item: {"project_id": str(project), "sprint_id": str(sprint)}},
+        sprints={sprint: {"project_id": str(project)}},
+        allow_without_sprint=False,
+    )
+
+    assert await _resolve_assignment(None, uuid4(), item, None, None) == (project, sprint)  # type: ignore[arg-type]
+
+
+async def test_selected_sprint_must_contain_the_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    project, sprint, other_sprint, item = uuid4(), uuid4(), uuid4(), uuid4()
+    _stub_assignment(
+        monkeypatch,
+        items={item: {"project_id": str(project), "sprint_id": str(other_sprint)}},
+        sprints={sprint: {"project_id": str(project)}, other_sprint: {"project_id": str(project)}},
+        allow_without_sprint=True,
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await _resolve_assignment(None, uuid4(), item, None, sprint)  # type: ignore[arg-type]
+    assert excinfo.value.code == "invalid_item"
+
+
+async def test_sprint_is_required_when_setting_disallows_no_sprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, item = uuid4(), uuid4()
+    _stub_assignment(
+        monkeypatch,
+        items={item: {"project_id": str(project), "sprint_id": None}},
+        sprints={},
+        allow_without_sprint=False,
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await _resolve_assignment(None, uuid4(), item, None, None)  # type: ignore[arg-type]
+    assert excinfo.value.code == "sprint_required"
+
+
+async def test_time_without_sprint_allowed_when_setting_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_assignment(monkeypatch, items={}, sprints={}, allow_without_sprint=True)
+
+    assert await _resolve_assignment(None, uuid4(), None, None, None) == (None, None)  # type: ignore[arg-type]
+
+
+async def test_sprint_must_belong_to_the_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    project, other_project, sprint = uuid4(), uuid4(), uuid4()
+    _stub_assignment(
+        monkeypatch,
+        items={},
+        sprints={sprint: {"project_id": str(other_project)}},
+        allow_without_sprint=True,
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await _resolve_assignment(None, uuid4(), None, project, sprint)  # type: ignore[arg-type]
+    assert excinfo.value.code == "invalid_sprint"
 
 
 def test_target_user_requires_view_all_for_other_users() -> None:
