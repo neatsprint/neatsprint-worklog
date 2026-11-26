@@ -793,6 +793,7 @@ async def export_timesheet(
             "source",
             "project_id",
             "item_id",
+            "sprint_id",
             "comment",
             "client_id",
         ]
@@ -806,6 +807,7 @@ async def export_timesheet(
                 entry.source,
                 str(entry.project_id) if entry.project_id else "",
                 str(entry.item_id) if entry.item_id else "",
+                str(entry.sprint_id) if entry.sprint_id else "",
                 entry.comment or "",
                 str(entry.client_id),
             ]
